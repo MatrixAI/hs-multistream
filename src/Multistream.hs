@@ -7,14 +7,23 @@ module Multistream (
     handle
 ) where
 
-import           Data.Attoparsec.ByteString   (Parser)
+import           Data.Attoparsec.ByteString   (Parser, maybeResult)
+
 import           Data.ByteString              (ByteString)
-import           Data.ByteString.Builder      (Builder, charUtf8)
+import qualified Data.ByteString              as BS
+
+import           Data.Bytes.Put               (putByteString, runPutS)
+import           Data.Bytes.Serial            (serialize)
+import           Data.Bytes.VarInt            (VarInt (..))
+import           Data.Serialize.Put           (Put)
+
 import           Data.List                    (find)
-import           Data.Monoid                  ((<>))
+
 import           Data.Text                    (Text)
 import qualified Data.Text                    as T
 import qualified Data.Text.Encoding           as TE
+
+import           Data.Word                    (Word8)
 
 import           System.IO.Streams            (InputStream, OutputStream)
 import qualified System.IO.Streams            as S
@@ -25,7 +34,7 @@ type Connection = (InputStream ByteString, OutputStream ByteString)
 data Handler = Handler
     {
         matchingFunc :: ByteString -> Bool,
-        name         :: Text,
+        hName        :: Text,
         handleConn   :: (Connection -> IO ())
     }
 
@@ -36,16 +45,21 @@ data MultistreamMuxer = MultistreamMuxer
 
 
 msVersion :: Text
-msVersion = ("/multistream/1.0.0" :: Text)
+msVersion = "/multistream/1.0.0"
 
--- todo: implement this
+-- todo: implement this read messages
 msParser :: Parser Text
 msParser = undefined
--- todo: need to swap out normal strings for multistream serialised strings
--- with varints at front
 
-msSerialize :: Text -> ByteString
-msSerialize s = (TE.encodeUtf8 s) `snoc` charUtf8 '\n'
+delimitedWrite :: OutputStream ByteString -> Text -> IO ()
+delimitedWrite os msg = do
+    let bsMsg = TE.encodeUtf8 $ T.snoc msg '\n'
+    S.write (Just $ runPutS $ putMsgWithLen bsMsg) os
+    where
+        putMsgWithLen :: ByteString -> Put
+        putMsgWithLen bs = do
+            serialize (VarInt (BS.length bs))
+            putByteString bs
 
 addHandler :: Handler -> MultistreamMuxer -> MultistreamMuxer
 addHandler h m@(MultistreamMuxer {handlers = old}) = m { handlers = h:old }
@@ -55,13 +69,38 @@ matchingHeader (is, os) mux = do
     header <- parseFromStream msParser is
     if header == msVersion
         then do
-            S.write (Just $ TE.encodeUtf8 header) os
+            delimitedWrite os header
             return True
         else do
-            -- swap out these for multistream serialised strings
-            S.write (Just $ TE.encodeUtf8 "non-matching multistream version") os
-            S.write Nothing os
             return False
+
+negotiate :: Connection -> MultistreamMuxer -> IO ()
+negotiate conn@(is, os) mux = do
+    matchedHeader <- matchingHeader conn mux
+    if not matchedHeader
+        then return ()
+    else do
+        r <- parseFromStream msParser is
+        case r of
+            "ls" -> do
+                let protos = map (hName) $ handlers mux
+                mapM_ (delimitedWrite os) protos
+                negotiate conn mux
+
+            p ->
+                case find (matchHandler p) $ handlers mux of
+                    Nothing -> do
+                        delimitedWrite os msVersion
+                        delimitedWrite os "na"
+                        negotiate conn mux
+
+                    Just h -> do
+                        delimitedWrite os $ hName h
+                        (handleConn h) conn
+
+                    where
+                        matchHandler :: Text -> Handler -> Bool
+                        matchHandler p h = (hName h) == p
 
 handle :: Connection -> MultistreamMuxer -> IO ()
 handle conn mux = do
@@ -72,37 +111,3 @@ handle conn mux = do
         else
             return ()
 
-      where
-        negotiate :: Connection -> MultistreamMuxer -> IO ()
-        negotiate conn@(is, os) mux = do
-            matchedHeader <- matchingHeader conn mux
-            if not matchedHeader
-                then return ()
-            else do
-                protocol <- parseFromStream msParser is
-                case protocol of
-                    -- Need some error catching logic here to handle
-                    -- if the stream was closed unexpectedly
-                    Nothing -> do
-                        -- swap out these for multistream serialised strings
-                        S.write (Just "stream closed unexpectedly") os
-
-                    Just "ls" -> do
-                        let protos = map (Just . handlerProtocol) $ handlers mux
-                        mapM_ (flip S.write os) protos
-                        negotiate conn mux
-
-                    Just p ->
-                        case find (matchHandler p) $ handlers mux of
-                            Nothing -> do
-                                S.write (Just msVersion) os
-                                S.write (Just "na") os
-                                negotiate conn mux
-
-                            Just h -> do
-                                S.write (Just $ handlerProtocol h) os
-                                (handleConn h) conn
-
-                            where
-                                matchHandler :: String -> Handler -> Bool
-                                matchHandler p h = (handlerProtocol h) == p
