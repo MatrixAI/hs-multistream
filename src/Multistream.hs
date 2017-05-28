@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns      #-}
 
-module Multistream (
+module Network.Multistream (
     Handler(..),
     MultistreamMuxer(..),
     addHandler,
@@ -30,11 +31,17 @@ import qualified System.IO.Streams            as S
 import           System.IO.Streams.Attoparsec (parseFromStream)
 
 type Connection = (InputStream ByteString, OutputStream ByteString)
+type Multistream = Text
+
+data MultistreamMessage = MSLs
+                        | MSNa
+                        | MSSelectedProtocol Multistream
+                        | MSProtocolList [Multistream]
 
 data Handler = Handler
     {
-        matchingFunc :: ByteString -> Bool,
-        hName        :: Text,
+        matchingFunc :: Multistream -> Bool,
+        hName        :: Multistream,
         handleConn   :: (Connection -> IO ())
     }
 
@@ -43,71 +50,102 @@ data MultistreamMuxer = MultistreamMuxer
         handlers :: [Handler]
     }
 
+msProtocol :: MultistreamMessage
+msProtocol = MSSelectedProtocol "/multistream/1.0.0"
 
-msVersion :: Text
-msVersion = "/multistream/1.0.0"
+getVarInt :: Parser Word32
+getVarInt = loop 1 0
+  where
+    loop !s !n = do
+        b <- anyWord8
+        let n' = n + s * fromIntegral (b .&. 127)
+        if (b .&. 128) == 0
+            then return $! n'
+            else loop (128*s) n'
 
--- todo: implement this read messages
-msParser :: Parser Text
-msParser = undefined
+parseMultistream :: Parser Multistream
+parseMultistream = do
+    len <- getVarInt
+    protocol <- take len
+    string "\n"
+    return $ TE.init . TE.decodeUtf8 protocol
 
-delimitedWrite :: OutputStream ByteString -> Text -> IO ()
-delimitedWrite os msg = do
-    let bsMsg = TE.encodeUtf8 $ T.snoc msg '\n'
-    S.write (Just $ runPutS $ putMsgWithLen bsMsg) os
-    where
-        putMsgWithLen :: ByteString -> Put
-        putMsgWithLen bs = do
-            serialize (VarInt (BS.length bs))
-            putByteString bs
+parseLs :: Parser MultistreamMessage
+parseLs = do
+    getVarInt
+    string "ls\n"
+    return MSLs
+
+parseNa :: Parser MultistreamMessage
+parseNa = do
+    getVarInt
+    string "na\n"
+    return MSNa
+
+parseSelectedProtocol :: Parser MultistreamMessage
+parseSelectedProtocol = parseMultistream >>= return . MSSelectedProtocol
+
+parseProtocolList :: Parser MultistreamMessage
+parseProtocolList = do
+    lenLine <- getVarInt
+    lenListProtocols <- getVarInt
+    nProtocols <- getVarInt
+    listProtocols <- count nProtocols parseMultistream
+    return $ MSProtocolList listProtocols
+
+putByteStringWith :: ByteString -> Put
+putByteStringWithLength bs = do
+    serialize (VarInt (BS.length bs))
+    putByteString bs
+
+writeMultistream :: OutputStream ByteString -> MultistreamMessage -> IO ()
+writeMultistream os (MSProtocolList ps) = do
+    let nProtocols = length ps
+    let 
+    
+writeMultistream os ms = do
+    let msText = case ms of
+                     MSLs                        -> "ls"
+                     MSNa                        -> "na"
+                     MSSelectedProtocol protocol -> protocol
+
+    TE.encodeUtf8 $ T.snoc msg '\n'
+    S.write (Just $ runPutS $ putByteStringWithLength bsMsg) os
 
 addHandler :: Handler -> MultistreamMuxer -> MultistreamMuxer
 addHandler h m@(MultistreamMuxer {handlers = old}) = m { handlers = h:old }
 
-matchingHeader :: Connection -> MultistreamMuxer -> IO Bool
-matchingHeader (is, os) mux = do
-    header <- parseFromStream msParser is
-    if header == msVersion
-        then do
-            delimitedWrite os header
-            return True
-        else do
-            return False
-
 negotiate :: Connection -> MultistreamMuxer -> IO ()
 negotiate conn@(is, os) mux = do
-    matchedHeader <- matchingHeader conn mux
-    if not matchedHeader
-        then return ()
-    else do
-        r <- parseFromStream msParser is
-        case r of
-            "ls" -> do
-                let protos = map (hName) $ handlers mux
-                mapM_ (delimitedWrite os) protos
-                negotiate conn mux
+    header <- parseFromStream parseProtocols is
+    r <- parseFromStream msParser is
+    case r of
+        MSList -> do
+            let protos = map (hName) $ handlers mux
+            mapM_ (writeMultistream os) protos
+            negotiate conn mux
 
-            p ->
-                case find (matchHandler p) $ handlers mux of
-                    Nothing -> do
-                        delimitedWrite os msVersion
-                        delimitedWrite os "na"
-                        negotiate conn mux
+        MSSelect p ->
+            case find (matchHandler p) $ handlers mux of
+                Nothing -> do
+                    writeMultistream os msVersion
+                    writeMultistream os "na"
+                    negotiate conn mux
 
-                    Just h -> do
-                        delimitedWrite os $ hName h
-                        (handleConn h) conn
-
-                    where
-                        matchHandler :: Text -> Handler -> Bool
-                        matchHandler p h = (hName h) == p
+                Just h -> do
+                    writeMultistream os $ hName h
+                    (handleConn h) conn
+                  where
+                    matchHandler :: Multistream -> Handler -> Bool
+                    matchHandler p h = (hName h) == p
 
 handle :: Connection -> MultistreamMuxer -> IO ()
 handle conn mux = do
-    matchedHeader <- matchingHeader conn mux
-    if matchedHeader
-        then do
-            negotiate conn mux
-        else
-            return ()
-
+    -- Greeting
+    header <- parseFromStream parseProtocols is
+    writeMultistream os msProtocol
+    if header == msProtocol 
+      then
+        negotiate conn mux
+      else
+        putStrLn "Incompatible multistream headers"
