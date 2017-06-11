@@ -8,7 +8,7 @@ module Network.Multistream (
     multistreamLength,
     parseVarInt,
     parseMatchText,
-    parseProtocol,
+    parseMultistreamLine,
     putMultistreamLine
 ) where
 
@@ -56,10 +56,10 @@ parseMatchText s = do
     return ()
 
 --TODO: ensure that the protocol has some "/a/b" type format
-parseProtocol :: Parser Multistream
-parseProtocol = do
+parseMultistreamLine :: Parser Multistream
+parseMultistreamLine = do
     len <- parseVarInt
-    protocol <- PS.take len
+    protocol <- PS.take (len - 1)
     string $ encodeUtf8 "\n"
     return $ Multistream $ decodeUtf8 protocol
 
@@ -68,3 +68,5 @@ putMultistreamLine (Multistream m) = do
     serialize (VarInt (T.length m + 1))
     putByteString $ encodeUtf8 m
     putByteString $ encodeUtf8 "\n"
+
+

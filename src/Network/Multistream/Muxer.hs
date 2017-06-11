@@ -7,7 +7,7 @@ module Network.Multistream.Muxer (
     handle
 ) where
 
-import           Data.Attoparsec.ByteString   (Parser, choice, count, string)
+import           Data.Attoparsec.ByteString   (Parser, choice)
 
 import           Data.ByteString              (ByteString)
 
@@ -70,10 +70,13 @@ negotiate conn@(is, os) mux = do
 handle :: Connection -> MultistreamMuxer -> IO ()
 handle conn@(is, os) mux = do
     -- Greeting
-    header <- parseFromStream MS.parseProtocolList is
+    putStrLn "parsing header"
+    header <- parseFromStream MS.parseSelectedProtocol is
+    putStrLn "replying with protocol version"
     writeMultistream os MS.protocolVersion
     if header == MS.protocolVersion
-      then
+      then do
+        putStrLn "matching protocol versions... starting negotiation"
         negotiate conn mux
-      else
-        putStrLn "Incompatible multistream headers"
+      else do
+        putStrLn "couldn't match protocol versions... terminating"

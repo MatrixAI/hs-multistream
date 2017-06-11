@@ -2,25 +2,28 @@
 
 module Network.Multistream.Message (
     MultistreamMessage(..),
+    ls,
+    makeProtocol,
     protocolVersion,
     parseLs,
     parseNa,
     parseSelectedProtocol,
-    parseProtocolList,
+    parseMultistreamLineList,
     putMultistreamMessage
 ) where
 
 
-import           Data.Attoparsec.ByteString (Parser, count, string)
+import           Data.Attoparsec.ByteString (Parser, count)
 import           Data.Bytes.Put             (runPutS)
 import           Data.Bytes.Serial          (serialize, serializeWith)
 import           Data.Bytes.VarInt          (VarInt (..))
 import qualified Data.ByteString            as BS
 import           Data.Serialize.Put         (Put)
+import           Data.Text                  (Text)
 
-import           Network.Multistream        (Multistream, parseMatchText,
-                                             parseProtocol, parseVarInt,
-                                             putMultistreamLine)
+import           Network.Multistream        (Multistream, encodeText,
+                                             parseMatchText, parseMultistreamLine,
+                                             parseVarInt, putMultistreamLine)
 import qualified Network.Multistream        as M
 
 data MultistreamMessage = MSLs
@@ -29,8 +32,14 @@ data MultistreamMessage = MSLs
                         | MSProtocolList [Multistream]
                         deriving (Eq)
 
+makeProtocol :: Text -> MultistreamMessage
+makeProtocol t = MSSelectedProtocol $ encodeText t
+
+ls :: MultistreamMessage
+ls = MSLs
+
 protocolVersion :: MultistreamMessage
-protocolVersion = MSSelectedProtocol $ M.encodeText "/multistream/1.0.0"
+protocolVersion = makeProtocol "/multistream/1.0.0"
 
 parseLs :: Parser MultistreamMessage
 parseLs = do
@@ -43,14 +52,14 @@ parseNa = do
     return MSNa
 
 parseSelectedProtocol :: Parser MultistreamMessage
-parseSelectedProtocol = parseProtocol >>= return . MSSelectedProtocol
+parseSelectedProtocol = parseMultistreamLine >>= return . MSSelectedProtocol
 
-parseProtocolList :: Parser MultistreamMessage
-parseProtocolList = do
+parseMultistreamLineList :: Parser MultistreamMessage
+parseMultistreamLineList = do
     lenLine <- parseVarInt
     lenListProtocols <- parseVarInt
     nProtocols <- parseVarInt
-    listProtocols <- count nProtocols parseProtocol
+    listProtocols <- count nProtocols parseMultistreamLine
     return $ MSProtocolList listProtocols
 
 putMultistreamMessage :: MultistreamMessage -> Put
