@@ -4,6 +4,7 @@ module Network.Multistream.Muxer (
     Handler(..),
     MultistreamMuxer(..),
     addHandler,
+    negotiateHandler,
     handle
 ) where
 
@@ -36,47 +37,68 @@ data Handler = Handler
         handleConn :: (Connection -> IO ())
     }
 
+newMultistreamMuxer :: MultistreamMuxer
+newMultistreamMuxer = MultistreamMuxer []
+
 addHandler :: Handler -> MultistreamMuxer -> MultistreamMuxer
 addHandler h m@(MultistreamMuxer {handlers = old}) = m { handlers = h:old }
 
-writeMultistream :: OutputStream ByteString -> MultistreamMessage -> IO ()
-writeMultistream os ms = do
-    S.write (Just $ runPutS $ MS.putMultistreamMessage ms) os
-
-negotiate :: Connection -> MultistreamMuxer -> IO ()
-negotiate conn@(is, os) mux = do
+negotiateHandler :: Connection -> MultistreamMuxer -> IO Handler
+negotiateHandler conn@(is, os) mux = do
     header <- parseFromStream MS.parseSelectedProtocol is
     r <- parseFromStream (choice [MS.parseLs, MS.parseSelectedProtocol]) is
     case r of
       MSLs -> do
         let protos = map (hName) $ handlers mux
         writeMultistream os (MSProtocolList protos)
-        negotiate conn mux
+        negotiateHandler conn mux
 
       MSSelectedProtocol p ->
           case find (matchHandler p) $ handlers mux of
             Nothing -> do
                 writeMultistream os MS.protocolVersion
                 writeMultistream os MSNa
-                negotiate conn mux
+                negotiateHandler conn mux
 
             Just h -> do
+                putStrLn "handler found"
+                putStrLn "replying with handler name"
                 writeMultistream os $ MSSelectedProtocol $ hName h
-                (handleConn h) conn
+                return h
             where
                 matchHandler :: Multistream -> Handler -> Bool
                 matchHandler p h = (hName h) == p
 
 handle :: Connection -> MultistreamMuxer -> IO ()
 handle conn@(is, os) mux = do
-    -- Greeting
-    putStrLn "parsing header"
-    header <- parseFromStream MS.parseSelectedProtocol is
-    putStrLn "replying with protocol version"
-    writeMultistream os MS.protocolVersion
+    handshake conn
+    putStrLn "matching protocol versions... starting negotiation"
+    handler <- negotiateHandler conn mux
+    putStrLn "negotiation successful... running handler"
+    handleConn handler $ conn
+
+handshake :: Connection -> IO ()
+handshake conn@(is,os) = do
+    header <- parseFromStream MS.parseSelectedProtocol is 
     if header == MS.protocolVersion
       then do
-        putStrLn "matching protocol versions... starting negotiation"
-        negotiate conn mux
+        writeMultistream os MS.protocolVersion
       else do
-        putStrLn "couldn't match protocol versions... terminating"
+        return ()
+
+trySelect :: Connection -> MultistreamMessage -> IO ()
+trySelect conn@(is, os) proto = do
+    writeMultistream os proto
+    reply <- parseFromStream (choice [MS.parseNa, MS.parseSelectedProtocol]) is
+    case reply of
+        MSNa -> return ()
+        MSSelectedProtocol p -> return ()
+
+selectProtocolOrFail :: Connection -> MultistreamMessage -> IO ()
+selectProtocolOrFail conn m = do
+    handshake conn
+    trySelect conn m
+
+writeMultistream :: OutputStream ByteString -> MultistreamMessage -> IO ()
+writeMultistream os ms = do
+    S.write (Just $ runPutS $ MS.putMultistreamMessage ms) os

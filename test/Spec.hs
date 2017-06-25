@@ -26,8 +26,8 @@ m1 = MultistreamMuxer [h1, h2]
 
 testNegotiate = [MS.protocolVersion,
                  MS.protocolVersion, MS.ls,
-                 MS.protocolVersion, MS.makeProtocol "/squidward",
-                 MS.protocolVersion, MS.makeProtocol "/spongebob"]
+                 MS.protocolVersion, MS.newProtocol "/squidward",
+                 MS.protocolVersion, MS.newProtocol "/spongebob"]
 
 main :: IO ()
 main = do

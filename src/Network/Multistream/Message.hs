@@ -3,7 +3,7 @@
 module Network.Multistream.Message (
     MultistreamMessage(..),
     ls,
-    makeProtocol,
+    newProtocol,
     protocolVersion,
     parseLs,
     parseNa,
@@ -32,14 +32,14 @@ data MultistreamMessage = MSLs
                         | MSProtocolList [Multistream]
                         deriving (Eq)
 
-makeProtocol :: Text -> MultistreamMessage
-makeProtocol t = MSSelectedProtocol $ encodeText t
+newProtocol :: Text -> MultistreamMessage
+newProtocol t = MSSelectedProtocol $ encodeText t
 
 ls :: MultistreamMessage
 ls = MSLs
 
 protocolVersion :: MultistreamMessage
-protocolVersion = makeProtocol "/multistream/1.0.0"
+protocolVersion = newProtocol "/multistream/1.0.0"
 
 parseLs :: Parser MultistreamMessage
 parseLs = do
@@ -81,3 +81,4 @@ putMultistreamMessage m = do
         MSLs                  -> putMultistreamLine (M.encodeText "ls")
         MSNa                  -> putMultistreamLine (M.encodeText "na")
         MSSelectedProtocol ms -> putMultistreamLine ms
+

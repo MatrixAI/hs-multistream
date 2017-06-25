@@ -69,4 +69,3 @@ putMultistreamLine (Multistream m) = do
     putByteString $ encodeUtf8 m
     putByteString $ encodeUtf8 "\n"
 
-
